@@ -1,0 +1,23 @@
+tmp/
+components/
+managed_components/
+build/
+build-local/
+.vscode/
+.devcontainer/
+sdkconfig.old
+# Keep sdkconfig and dependencies.lock for this device's reproducible backup.
+.env
+.env.*
+!.env.example
+monitor.txt
+*.log
+main/weather/weather_credentials.h
+releases/
+main/assets/lang_config.h
+main/mmap_generate_emoji.h
+.DS_Store
+.cache
+main/mmap_generate_emoji.h
+*.pyc
+*.bin
