@@ -5,6 +5,7 @@
 #include "application.h"
 #include "button.h"
 #include "config.h"
+#include "pin_validation.h"
 #include "mcp_server.h"
 #include "timer_controller.h"
 #include "lamp_controller.h"
@@ -78,7 +79,7 @@ private:
     Button key2_button_;
     LcdDisplay* display_;
 
-    static void RunGestureLogTest() {
+    static void RunGestureControl() {
 #if GESTURE_SENSOR_ENABLED
         i2c_master_bus_config_t bus_config = {};
         bus_config.i2c_port = static_cast<i2c_port_num_t>(-1);
@@ -94,18 +95,20 @@ private:
                      esp_err_to_name(err));
             return;
         }
-        ESP_LOGI("PAJ7620", "Log test: SDA=%d SCL=%d, poll=%d ms",
+        ESP_LOGI("PAJ7620", "Control: SDA=%d SCL=%d, poll=%d ms",
                  GESTURE_I2C_SDA_GPIO, GESTURE_I2C_SCL_GPIO, GESTURE_POLL_PERIOD_MS);
         {
             Paj7620 sensor(bus, PAJ7620_I2C_ADDRESS);
             err = sensor.Initialize();
             if (err == ESP_OK) {
                 int consecutive_errors = 0;
+                gesture_policy::Filter gesture_filter;
                 while (true) {
                     Paj7620::Gesture gesture;
                     uint16_t flags = 0;
                     err = sensor.ReadGesture(gesture, flags);
                     if (err != ESP_OK) {
+                        gesture_filter = {}; // Never replay a gesture across an I2C failure.
                         ++consecutive_errors;
                         if (consecutive_errors == 1) {
                             ESP_LOGW("PAJ7620", "Read failed: %s", esp_err_to_name(err));
@@ -123,6 +126,10 @@ private:
                             ESP_LOGI("PAJ7620", "Gesture: %s (raw=0x%04X)",
                                      Paj7620::GestureName(gesture), flags);
                         }
+                        const auto accepted = gesture_filter.Poll(gesture, esp_timer_get_time());
+                        if (accepted != Paj7620::Gesture::kNone) {
+                            Application::GetInstance().HandleGesture(accepted);
+                        }
                     }
                     vTaskDelay(pdMS_TO_TICKS(GESTURE_POLL_PERIOD_MS));
                 }
@@ -133,14 +140,13 @@ private:
 #endif
     }
 
-    void InitializeGestureLogTest() {
+    void InitializeGestureControl() {
 #if GESTURE_SENSOR_ENABLED
-        // Independent low-priority task; never calls the application/display
-        // during board construction and never blocks the voice main loop.
+        // Sensor task only queues actions; the application main loop owns UI and audio changes.
         BaseType_t result = xTaskCreate([](void*) {
-            RunGestureLogTest();
+            RunGestureControl();
             vTaskDelete(nullptr);
-        }, "paj7620_log", 4096, nullptr, 2, nullptr);
+        }, "paj7620_ctrl", 4096, nullptr, 2, nullptr);
         if (result != pdPASS) {
             ESP_LOGW("PAJ7620", "Cannot create gesture task; TV continues without it");
         }
@@ -291,7 +297,7 @@ public:
         InitializeLcdDisplay();
         InitializeButtons();
         InitializeTools();
-        InitializeGestureLogTest();
+        InitializeGestureControl();
         InitializeStatusRing();
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();

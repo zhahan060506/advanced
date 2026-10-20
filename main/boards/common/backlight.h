@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <mutex>
 
 #include <driver/gpio.h>
 #include <esp_timer.h>
@@ -14,16 +15,20 @@ public:
 
     void RestoreBrightness();
     void SetBrightness(uint8_t brightness, bool permanent = false);
-    inline uint8_t brightness() const { return brightness_; }
+    inline uint8_t brightness() const {
+        std::lock_guard<std::mutex> lock(brightness_mutex_);
+        return brightness_;
+    }
 
 protected:
     void OnTransitionTimer();
     virtual void SetBrightnessImpl(uint8_t brightness) = 0;
 
     esp_timer_handle_t transition_timer_ = nullptr;
+    mutable std::mutex brightness_mutex_;
     uint8_t brightness_ = 0;
     uint8_t target_brightness_ = 0;
-    uint8_t step_ = 1;
+    int8_t step_ = 1;
 };
 
 

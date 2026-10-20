@@ -2,6 +2,7 @@
 #define AUDIO_SERVICE_H
 
 #include <memory>
+#include <atomic>
 #include <deque>
 #include <condition_variable>
 #include <chrono>
@@ -128,6 +129,9 @@ private:
     TaskHandle_t audio_output_task_handle_ = nullptr;
     TaskHandle_t opus_codec_task_handle_ = nullptr;
     std::mutex audio_queue_mutex_;
+    // If both are needed, acquire decoder_mutex_ before audio_queue_mutex_.
+    std::mutex decoder_mutex_;
+    uint32_t decode_generation_ = 0;  // Protected by audio_queue_mutex_.
     std::condition_variable audio_queue_cv_;
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_decode_queue_;
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_send_queue_;
@@ -141,8 +145,8 @@ private:
 
     bool wake_word_initialized_ = false;
     bool audio_processor_initialized_ = false;
-    bool voice_detected_ = false;
-    bool service_stopped_ = true;
+    std::atomic<bool> voice_detected_{false};
+    std::atomic<bool> service_stopped_{true};
     bool audio_input_need_warmup_ = false;
 
     esp_timer_handle_t audio_power_timer_ = nullptr;

@@ -3,6 +3,7 @@
 #include <string>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 
 #include "display.h"
 #include "board.h"
@@ -45,6 +46,8 @@ Display::Display() {
 }
 
 Display::~Display() {
+    if (gesture_volume_timer_) lv_timer_delete(gesture_volume_timer_);
+    if (gesture_volume_) lv_obj_delete(gesture_volume_);
     if (notification_timer_ != nullptr) {
         esp_timer_stop(notification_timer_);
         esp_timer_delete(notification_timer_);
@@ -122,6 +125,7 @@ void Display::ShowNotification(const char* notification, int duration_ms) {
 void Display::Switch_Dialogue_Page(void)
 {
     DisplayLockGuard lock(this);
+    if (info_panel_) lv_obj_add_flag(info_panel_, LV_OBJ_FLAG_HIDDEN);
     ESP_LOGI(TAG, "Switching to dialogue page");
     if (main_screen_ != nullptr) {
         lv_obj_add_flag(main_screen_, LV_OBJ_FLAG_HIDDEN);
@@ -146,6 +150,7 @@ void Display::Switch_Dialogue_Page(void)
 void Display::Return_Switch_Page(void)
 {
     DisplayLockGuard lock(this);
+    if (info_panel_) lv_obj_add_flag(info_panel_, LV_OBJ_FLAG_HIDDEN);
     ESP_LOGI(TAG, "Switching to switch page");
     if (current_page_== PAGE_MAIN) {
         if (main_screen_ != nullptr) {
@@ -171,6 +176,7 @@ void Display::Return_Switch_Page(void)
 void Display::Switch_Main_Page(void)
 {
     DisplayLockGuard lock(this);
+    if (info_panel_) lv_obj_add_flag(info_panel_, LV_OBJ_FLAG_HIDDEN);
     ESP_LOGI(TAG, "Switching to main page");
     if (dialogue_screen_ != nullptr) {
         lv_obj_add_flag(dialogue_screen_, LV_OBJ_FLAG_HIDDEN);
@@ -193,6 +199,7 @@ void Display::Switch_Main_Page(void)
 void Display::Switch_Timer_Page(void)
 {
     DisplayLockGuard lock(this);
+    if (info_panel_) lv_obj_add_flag(info_panel_, LV_OBJ_FLAG_HIDDEN);
     ESP_LOGI(TAG, "Switching to timer page");
     if (main_screen_ != nullptr) {
         lv_obj_add_flag(main_screen_, LV_OBJ_FLAG_HIDDEN);
@@ -226,6 +233,70 @@ void Display::SetTimerText(const char* text)
         return;
     }
     lv_label_set_text(timer_value_label_, text);
+}
+
+void Display::Switch_Info_Page(bool alarm, const std::string& text) {
+    DisplayLockGuard lock(this);
+    if (!main_screen_) return;
+    if (!info_panel_) {
+        info_panel_ = lv_obj_create(lv_obj_get_parent(main_screen_));
+        lv_obj_set_size(info_panel_, lv_pct(100), lv_pct(100));
+        lv_obj_set_style_bg_color(info_panel_, lv_color_hex(0x101820), 0);
+        lv_obj_set_style_bg_opa(info_panel_, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(info_panel_, lv_color_white(), 0);
+        lv_obj_set_style_text_font(info_panel_, lv_obj_get_style_text_font(city_text_ ? city_text_ : main_screen_, LV_PART_MAIN), 0);
+        lv_obj_set_style_border_width(info_panel_, 0, 0);
+        lv_obj_set_style_radius(info_panel_, 0, 0);
+        lv_obj_clear_flag(info_panel_, LV_OBJ_FLAG_SCROLLABLE);
+        info_title_ = lv_label_create(info_panel_);
+        lv_obj_align(info_title_, LV_ALIGN_TOP_MID, 0, 4);
+        info_body_ = lv_label_create(info_panel_);
+        lv_obj_set_width(info_body_, lv_pct(100));
+        lv_obj_set_style_text_align(info_body_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(info_body_, LV_ALIGN_CENTER, 0, 0);
+        auto* hint = lv_label_create(info_panel_);
+        lv_label_set_text(hint, "后拉返回主页");
+        lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -4);
+    }
+    lv_label_set_text(info_title_, alarm ? "闹钟" : "天气");
+    if (alarm) {
+        lv_label_set_text(info_body_, text.c_str());
+    } else {
+        lv_label_set_text_fmt(info_body_, "%s\n%s",
+            city_text_ ? lv_label_get_text(city_text_) : "--",
+            temp_text_ ? lv_label_get_text(temp_text_) : "--");
+    }
+    lv_obj_move_foreground(info_panel_);
+    lv_obj_clear_flag(info_panel_, LV_OBJ_FLAG_HIDDEN);
+    current_page_ = alarm ? PAGE_ALARM : PAGE_WEATHER;
+    ESP_LOGI(TAG, "Switching to %s page", alarm ? "alarm" : "weather");
+}
+
+void Display::UpdateAlarmInfo(const std::string& text) {
+    DisplayLockGuard lock(this);
+    if (current_page_ == PAGE_ALARM && info_body_) lv_label_set_text(info_body_, text.c_str());
+}
+
+void Display::ShowGestureVolume(int volume) {
+    DisplayLockGuard lock(this);
+    if (!main_screen_) return;
+    if (!gesture_volume_) {
+        gesture_volume_ = lv_label_create(lv_layer_top());
+        lv_obj_set_style_text_font(gesture_volume_, lv_obj_get_style_text_font(city_text_ ? city_text_ : main_screen_, LV_PART_MAIN), 0);
+        lv_obj_set_style_bg_color(gesture_volume_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(gesture_volume_, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_color(gesture_volume_, lv_color_white(), 0);
+        lv_obj_set_style_pad_all(gesture_volume_, 8, 0);
+        gesture_volume_timer_ = lv_timer_create([](lv_timer_t* timer) {
+            lv_obj_add_flag(static_cast<lv_obj_t*>(lv_timer_get_user_data(timer)), LV_OBJ_FLAG_HIDDEN);
+            lv_timer_pause(timer);
+        }, 1500, gesture_volume_);
+    }
+    lv_label_set_text_fmt(gesture_volume_, "音量 %d%%", volume);
+    lv_obj_align(gesture_volume_, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_clear_flag(gesture_volume_, LV_OBJ_FLAG_HIDDEN);
+    lv_timer_reset(gesture_volume_timer_);
+    lv_timer_resume(gesture_volume_timer_);
 }
 
 void Display::Switch_Health_Check_Page(void)
@@ -305,6 +376,9 @@ void Display::SetWeather(void)
     if (temp_text_ == nullptr)
         return;
     lv_label_set_text(temp_text_, weather_data);
+    if (current_page_ == PAGE_WEATHER && info_body_) {
+        lv_label_set_text_fmt(info_body_, "%s\n%s", lv_label_get_text(city_text_), weather_data);
+    }
 
     if (weather_icon_ == nullptr)
         return;
@@ -371,10 +445,18 @@ void Display::SetWeather(void)
 
 void Display::UpdateWeather(void)
 {
-    auto& board = Board::GetInstance();
-    auto weather = board.GetWeather();
-    if (weather->Get_Weather() == true)
-        SetWeather();
+    if (weather_update_running_.exchange(true)) return;
+    // HTTP/TLS must never block the shared ESP timer task or the voice loop.
+    if (xTaskCreate([](void* arg) {
+        auto* display = static_cast<Display*>(arg);
+        auto* weather = Board::GetInstance().GetWeather();
+        if (weather && weather->Get_Weather()) display->SetWeather();
+        display->weather_update_running_.store(false);
+        vTaskDelete(nullptr);
+    }, "weather_update", 8192, this, 2, nullptr) != pdPASS) {
+        weather_update_running_.store(false);
+        ESP_LOGW(TAG, "Cannot create weather task; keeping last weather");
+    }
 }
 
 void Display::UpDateNetWork(void)
@@ -408,13 +490,11 @@ void Display::UpDateHealth(void)
 
 void Display::UpDateBattery(void)
 {
-    esp_pm_lock_acquire(pm_lock_);
-    
-    if (battery_label_ == nullptr) 
-        return;
+    if (battery_label_ == nullptr) return;
+    if (pm_lock_) esp_pm_lock_acquire(pm_lock_);
     const char* icon = nullptr;
     auto Battery = Board::GetInstance().GetBatteryMonitor();
-    int battery_level = Battery->get_battery_percent();
+    int battery_level = std::clamp<int>(Battery->get_battery_percent(), 0, 100);
     const char* levels[] = {
                 FONT_AWESOME_BATTERY_EMPTY, // 0-19%
                 FONT_AWESOME_BATTERY_1,    // 20-39%
@@ -429,7 +509,7 @@ void Display::UpDateBattery(void)
     DisplayLockGuard lock(this);
     lv_label_set_text(battery_label_, icon);  // 或具体电量图标：""（满电）、""（75%）等
     // lv_label_set_text_fmt(battery_label_, "%d%%", battery_level);
-    esp_pm_lock_release(pm_lock_);
+    if (pm_lock_) esp_pm_lock_release(pm_lock_);
 }
 
 

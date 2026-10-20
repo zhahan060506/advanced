@@ -7,6 +7,7 @@
 #include <esp_pm.h>
 
 #include <string>
+#include <atomic>
 #include <chrono>
 #define Switch_Count 3
 
@@ -33,6 +34,8 @@ enum OledDisplayPage {
     PAGE_DETE,          //  健康检测页面
     PAGE_INIT,
     PAGE_TIMER,
+    PAGE_WEATHER,
+    PAGE_ALARM,
 };
 
 enum OledDisplaySwitch {
@@ -64,6 +67,9 @@ public:
     void Switch_Health_Check_Page(void);
     void SetTimerRemaining(int seconds);
     void SetTimerText(const char* text);
+    void Switch_Info_Page(bool alarm, const std::string& text = {});
+    void UpdateAlarmInfo(const std::string& text);
+    void ShowGestureVolume(int volume);
 
     void Return_Switch_Page(void);
     virtual void SetTime(const char* time_str);
@@ -96,14 +102,15 @@ protected:
     int height_ = 0;
     
     Select_Page pages[3] = {};
-    OledDisplayPage current_page_ = PAGE_INIT;  // 当前页面
+    std::atomic<OledDisplayPage> current_page_{PAGE_INIT};
+    std::atomic<bool> weather_update_running_{false};
     OledDisplaySwitch current_index_ = Switch_MAIN;
 
     esp_pm_lock_handle_t pm_lock_ = nullptr;
     lv_display_t *display_ = nullptr;
 
-    lv_obj_t *spo2_value_;
-    lv_obj_t *heart_value_;
+    lv_obj_t *spo2_value_ = nullptr;
+    lv_obj_t *heart_value_ = nullptr;
     lv_obj_t *emotion_label_ = nullptr;
     lv_obj_t *network_label_ = nullptr;
     lv_obj_t *status_label_ = nullptr;
@@ -148,6 +155,11 @@ protected:
     lv_obj_t* weather_label_ = nullptr;
     lv_obj_t* weather_ = nullptr;
     lv_obj_t* timer_value_label_ = nullptr;
+    lv_obj_t* info_panel_ = nullptr;
+    lv_obj_t* info_title_ = nullptr;
+    lv_obj_t* info_body_ = nullptr;
+    lv_obj_t* gesture_volume_ = nullptr;
+    lv_timer_t* gesture_volume_timer_ = nullptr;
 
     lv_obj_t* page_network_label_ = nullptr;
     

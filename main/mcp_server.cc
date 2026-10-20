@@ -155,7 +155,7 @@ void McpServer::ParseMessage(const cJSON* json) {
     // Check JSONRPC version
     auto version = cJSON_GetObjectItem(json, "jsonrpc");
     if (version == nullptr || !cJSON_IsString(version) || strcmp(version->valuestring, "2.0") != 0) {
-        ESP_LOGE(TAG, "Invalid JSONRPC version: %s", version ? version->valuestring : "null");
+        ESP_LOGE(TAG, "Invalid JSONRPC version: %s", cJSON_IsString(version) ? version->valuestring : "null");
         return;
     }
     
@@ -230,6 +230,10 @@ void McpServer::ParseMessage(const cJSON* json) {
             ReplyError(id_int, "Invalid stackSize");
             return;
         }
+        if (stack_size && (stack_size->valueint < 4096 || stack_size->valueint > 65536)) {
+            ReplyError(id_int, "stackSize must be between 4096 and 65536 bytes");
+            return;
+        }
         DoToolCall(id_int, std::string(tool_name->valuestring), tool_arguments, stack_size ? stack_size->valueint : DEFAULT_TOOLCALL_STACK_SIZE);
     } else {
         ESP_LOGE(TAG, "Method not implemented: %s", method_str.c_str());
@@ -248,9 +252,13 @@ void McpServer::ReplyResult(int id, const std::string& result) {
 void McpServer::ReplyError(int id, const std::string& message) {
     std::string payload = "{\"jsonrpc\":\"2.0\",\"id\":";
     payload += std::to_string(id);
-    payload += ",\"error\":{\"message\":\"";
-    payload += message;
-    payload += "\"}}";
+    payload += ",\"error\":{\"message\":";
+    cJSON* json_message = cJSON_CreateString(message.c_str());
+    char* encoded = json_message ? cJSON_PrintUnformatted(json_message) : nullptr;
+    payload += encoded ? encoded : "\"MCP error\"";
+    cJSON_free(encoded);
+    cJSON_Delete(json_message);
+    payload += "}}";
     Application::GetInstance().SendMcpMessage(payload);
 }
 
@@ -352,10 +360,14 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
     cfg.thread_name = "tool_call";
     cfg.stack_size = stack_size;
     cfg.prio = 1;
-    esp_pthread_set_cfg(&cfg);
+    if (esp_pthread_set_cfg(&cfg) != ESP_OK) {
+        ReplyError(id, "Unable to configure tool thread");
+        return;
+    }
 
     // Use a thread to call the tool to avoid blocking the main thread
-    tool_call_thread_ = std::thread([this, id, tool_iter, arguments = std::move(arguments)]() {
+    try {
+      tool_call_thread_ = std::thread([this, id, tool_iter, arguments = std::move(arguments)]() {
         try {
             ReplyResult(id, (*tool_iter)->Call(arguments));
         } catch (const std::exception& e) {
@@ -363,5 +375,9 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
             ReplyError(id, e.what());
         }
     });
-    tool_call_thread_.detach();
+      tool_call_thread_.detach();
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Cannot start tool thread: %s", e.what());
+        ReplyError(id, "Unable to start tool thread");
+    }
 }

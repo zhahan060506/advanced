@@ -3,11 +3,13 @@
 #include "display.h"
 #include "system_info.h"
 #include "audio_codec.h"
+#include "timer_controller.h"
 #include "mqtt_protocol.h"
 #include "websocket_protocol.h"
 #include "font_awesome_symbols.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
+#include "timing_policy.h"
 
 #if CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_LCD
 #include "status_light_controller.h"
@@ -39,7 +41,6 @@ static const char* const STATE_STRINGS[] = {
     "activating",
     "audio_testing",
     "fatal_error",
-    "invalid_state",
     "health",
     "stop",
     "switch"
@@ -335,16 +336,68 @@ void Application::StopListening() {
     }
 
     Schedule([this]() {
-        if (device_state_ == kDeviceStateListening) {
+        if (protocol_ && device_state_ == kDeviceStateListening) {
             protocol_->SendStopListening();
             SetDeviceState(kDeviceStateIdle);
         }
     });
 }
 
-void Application::ReturnToMainPage() {
-    Schedule([this]() {
-        EnterHomeStandby();
+void Application::ReturnToMainPage(std::function<bool()> condition) {
+    Schedule([this, condition = std::move(condition)]() {
+        if (!condition || condition()) EnterHomeStandby();
+    });
+}
+
+void Application::HandleGesture(gesture_policy::Gesture gesture) {
+    if (!gesture_policy::Supported(gesture) || gesture_pending_.exchange(true)) return;
+    const auto received = esp_timer_get_time();
+    Schedule([this, gesture, received]() {
+        gesture_pending_.store(false);
+        if (esp_timer_get_time() - received > 1500000) return;
+        const auto state = GetDeviceState();
+        // Ignore inputs during startup, provisioning, OTA and connection setup.
+        if (state != kDeviceStateIdle && state != kDeviceStateListening &&
+            state != kDeviceStateSpeaking) return;
+        auto& timer = TimerController::GetInstance();
+        if (timer.GetIndicatorState().ringing) {
+            timer.HandleKey1();
+            ESP_LOGI("GestureControl", "Stopped ringing");
+            return;
+        }
+        auto* display = Board::GetInstance().GetDisplay();
+        using G = gesture_policy::Gesture;
+        switch (gesture) {
+            case G::kLeft:
+            case G::kRight:
+                EnterHomeStandby();
+                display->Switch_Info_Page(gesture == G::kRight,
+                    gesture == G::kRight ? timer.GetAlarmText() : std::string{});
+                ESP_LOGI("GestureControl", "%s page", gesture == G::kLeft ? "Weather" : "Alarm");
+                break;
+            case G::kUp:
+            case G::kDown: {
+                auto* codec = Board::GetInstance().GetAudioCodec();
+                const int volume = gesture_policy::VolumeAfter(codec->output_volume(), gesture);
+                codec->SetOutputVolume(volume);
+                display->ShowGestureVolume(volume);
+                ESP_LOGI("GestureControl", "Volume: %d", volume);
+                break;
+            }
+            case G::kForward:
+                // Idempotent: a repeated forward gesture never closes a chat.
+                if (state == kDeviceStateIdle) {
+                    display->Switch_Dialogue_Page();
+                    ToggleChatState();
+                    ESP_LOGI("GestureControl", "Start conversation");
+                }
+                break;
+            case G::kBackward:
+                EnterHomeStandby();
+                ESP_LOGI("GestureControl", "Return home (timer/alarm preserved)");
+                break;
+            default: break; // WAVE only stops ringing; rotations stay unassigned.
+        }
     });
 }
 
@@ -361,7 +414,6 @@ void Application::Start() {
     /* Setup the audio service */
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
-    audio_service_.Start();
     
 
     AudioServiceCallbacks callbacks;
@@ -376,6 +428,7 @@ void Application::Start() {
             xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
     audio_service_.SetCallbacks(callbacks);
+    audio_service_.Start();
 
     /* Start the clock timer to update the status bar */
     esp_timer_start_periodic(clock_timer_handle_, 1000000);
@@ -406,7 +459,10 @@ void Application::Start() {
     }
 
     protocol_->OnNetworkError([this](const std::string& message) {
-        last_error_message_ = message;
+        {
+            std::lock_guard<std::mutex> lock(error_mutex_);
+            last_error_message_ = message;
+        }
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
@@ -432,8 +488,10 @@ void Application::Start() {
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
+        if (!cJSON_IsString(type)) return;
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
+            if (!cJSON_IsString(state)) return;
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
                     aborted_ = false;
@@ -444,24 +502,7 @@ void Application::Start() {
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
                     if (device_state_ == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeRealtime) {
-                            SetDeviceState(kDeviceStateListening);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                            xTaskCreate([](void*) {
-                                vTaskDelay(pdMS_TO_TICKS(20000));
-
-                                auto& app = Application::GetInstance();
-                                auto display = Board::GetInstance().GetDisplay();
-                                if (app.GetDeviceState() == kDeviceStateListening &&
-                                    display->GetCurrentPage() == PAGE_CHAT) {
-                                    app.Schedule([]() {
-                                        Application::GetInstance().EnterHomeStandby();
-                                    });
-                                }
-                                vTaskDelete(nullptr);
-                            }, "chat_idle_return", 3072, nullptr, 3, nullptr);
-                        }
+                        SetDeviceState(kDeviceStateListening);
                     }
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
@@ -478,6 +519,9 @@ void Application::Start() {
             if (cJSON_IsString(text)) {
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
                 Schedule([this, display, message = std::string(text->valuestring)]() {
+                    if (chat_idle_start_us_.load() != 0) {
+                        chat_idle_start_us_.store(esp_timer_get_time());
+                    }
                     display->SetChatMessage("user", message.c_str());
                 });
             }
@@ -558,12 +602,30 @@ void Application::Start() {
 }
     
 void Application::OnClockTimer() {
+    xEventGroupSetBits(event_group_, MAIN_EVENT_CLOCK);
+}
+
+void Application::OnClockTick() {
     clock_ticks_++;
 
     auto display = Board::GetInstance().GetDisplay();
+    auto started = chat_idle_start_us_.load();
+    const auto state = GetDeviceState();
+    if (timing_policy::IdleExpired(started, esp_timer_get_time()) &&
+        display->GetCurrentPage() == PAGE_CHAT &&
+        (state == kDeviceStateIdle || state == kDeviceStateListening) &&
+        chat_idle_start_us_.compare_exchange_strong(started, 0)) {
+        EnterHomeStandby();
+    }
     display->UpdateStatusBar();
     if (display->GetCurrentPage() == PAGE_INIT)
         return ;
+    if (display->GetCurrentPage() == PAGE_ALARM) {
+        display->UpdateAlarmInfo(TimerController::GetInstance().GetAlarmText());
+    }
+    if (display->GetCurrentPage() == PAGE_WEATHER && clock_ticks_ % 600 == 0) {
+        display->UpdateWeather();
+    }
     if (display->GetCurrentPage() == PAGE_MAIN)
     {
         display->UpdateTime();
@@ -601,10 +663,16 @@ void Application::MainEventLoop() {
             MAIN_EVENT_SEND_AUDIO |
             MAIN_EVENT_WAKE_WORD_DETECTED |
             MAIN_EVENT_VAD_CHANGE |
+            MAIN_EVENT_CLOCK |
             MAIN_EVENT_ERROR, pdTRUE, pdFALSE, portMAX_DELAY);
         if (bits & MAIN_EVENT_ERROR) {
+            std::string error_message;
+            {
+                std::lock_guard<std::mutex> lock(error_mutex_);
+                error_message = last_error_message_;
+            }
             SetDeviceState(kDeviceStateIdle);
-            Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "sad", Lang::Sounds::P3_EXCLAMATION);
+            Alert(Lang::Strings::ERROR, error_message.c_str(), "sad", Lang::Sounds::P3_EXCLAMATION);
         }
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
@@ -640,6 +708,7 @@ void Application::MainEventLoop() {
                 task();
             }
         }
+        if (bits & MAIN_EVENT_CLOCK) OnClockTick();
     }
 }
 
@@ -715,13 +784,23 @@ void Application::EnterHomeStandby() {
 }
 
 void Application::SetDeviceState(DeviceState state) {
+    static_assert(sizeof(STATE_STRINGS) / sizeof(STATE_STRINGS[0]) == kDeviceStateSwitch + 1);
+    if (state < kDeviceStateUnknown || state > kDeviceStateSwitch) {
+        ESP_LOGW(TAG, "Ignoring invalid device state %d", static_cast<int>(state));
+        return;
+    }
     if (device_state_ == state) {
         return;
     }
     
     clock_ticks_ = 0;
-    auto previous_state = device_state_;
+    auto previous_state = device_state_.load();
     device_state_ = state;
+    chat_idle_start_us_.store(
+        previous_state == kDeviceStateSpeaking &&
+        (state == kDeviceStateIdle ||
+         (state == kDeviceStateListening && listening_mode_ != kListeningModeRealtime))
+        ? esp_timer_get_time() : 0);
     ESP_LOGI(TAG, "STATE: %s", STATE_STRINGS[device_state_]);
 
     // Send the state change event
@@ -771,19 +850,6 @@ void Application::SetDeviceState(DeviceState state) {
                 display->SetEmotion("neutral");
                 audio_service_.EnableVoiceProcessing(false);
                 audio_service_.EnableWakeWordDetection(true);
-                if (previous_state == kDeviceStateSpeaking) {
-                    xTaskCreate([](void*) {
-                        vTaskDelay(pdMS_TO_TICKS(20000));
-                        auto& app = Application::GetInstance();
-                        auto display = Board::GetInstance().GetDisplay();
-                        if (app.GetDeviceState() == kDeviceStateIdle && display->GetCurrentPage() == PAGE_CHAT) {
-                            app.Schedule([]() {
-                                Application::GetInstance().EnterHomeStandby();
-                            });
-                        }
-                        vTaskDelete(nullptr);
-                    }, "return_main", 3072, nullptr, 3, nullptr);
-                }
             break;
         case kDeviceStateConnecting:
             display->SetStatus(Lang::Strings::CONNECTING);

@@ -23,7 +23,7 @@ class BatteryMonitor {
 private:
     adc_oneshot_unit_handle_t adc_handle;       // ADC单拍模式句柄（v5.3新特性）
     adc_cali_handle_t adc_cali_handle = NULL;
-    bool is_calibrated;                         // 校准状态
+    bool is_calibrated = false;                 // 校准状态
     float voltage_div_ratio;                    // 分压比：(R1+R2)/R2 = 2
     void adc_init();
     uint32_t read_adc_voltage() ;

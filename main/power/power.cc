@@ -10,6 +10,9 @@ BatteryMonitor::BatteryMonitor(){
 }
 
 BatteryMonitor::~BatteryMonitor() {
+    if (is_calibrated && adc_cali_handle) {
+        adc_cali_delete_scheme_curve_fitting(adc_cali_handle);
+    }
     // 释放ADC资源
     if (adc_handle) {
         adc_oneshot_del_unit(adc_handle);
@@ -42,9 +45,12 @@ void BatteryMonitor::adc_calibration_init() {
         .bitwidth = ADC_BIT_WIDTH,
     };
     esp_err_t ret = adc_cali_create_scheme_curve_fitting(&cali_config, &adc_cali_handle);
+    is_calibrated = ret == ESP_OK;
+    if (!is_calibrated) ESP_LOGW(TAG, "ADC calibration unavailable; battery reading disabled");
 }
 
 uint32_t BatteryMonitor::read_adc_voltage() {
+    if (!is_calibrated || !adc_cali_handle) return 0;
     // 多次采样取平均
     uint32_t total_raw = 0;
     const uint8_t samples = 5;
@@ -61,9 +67,10 @@ uint32_t BatteryMonitor::read_adc_voltage() {
     }
 
     // 计算平均原始值
+    if (valid_samples == 0) return 0;
     float avg_raw = (float)(total_raw) / valid_samples;
     int voltage = 0;
-    adc_cali_raw_to_voltage(adc_cali_handle, avg_raw, &voltage);
+    if (adc_cali_raw_to_voltage(adc_cali_handle, avg_raw, &voltage) != ESP_OK || voltage < 0) return 0;
     printf("实际的电压：%d， adc采集的值：%.1f\n", voltage, avg_raw);
     // 使用基础校准公式（替代line fitting方案）
     // 参考电压1100mV，12位精度(0-4095),  × 衰减倍数

@@ -2,15 +2,13 @@
 #define PAJ7620_H_
 
 #include <cstdint>
+#include "gesture_policy.h"
 #include <driver/i2c_master.h>
 
 // Single-task driver. The caller owns the I2C bus and must outlive this device.
 class Paj7620 {
 public:
-    enum class Gesture {
-        kNone, kUp, kDown, kLeft, kRight, kForward, kBackward,
-        kClockwise, kCounterClockwise, kWave, kUnknown,
-    };
+    using Gesture = gesture_policy::Gesture;
 
     explicit Paj7620(i2c_master_bus_handle_t bus, uint8_t address = 0x73);
     ~Paj7620();

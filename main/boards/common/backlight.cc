@@ -44,11 +44,12 @@ void Backlight::RestoreBrightness() {
 }
 
 void Backlight::SetBrightness(uint8_t brightness, bool permanent) {
+    std::lock_guard<std::mutex> lock(brightness_mutex_);
     if (brightness > 100) {
         brightness = 100;
     }
 
-    if (brightness_ == brightness) {
+    if (brightness_ == brightness && target_brightness_ == brightness) {
         return;
     }
 
@@ -68,6 +69,7 @@ void Backlight::SetBrightness(uint8_t brightness, bool permanent) {
 }
 
 void Backlight::OnTransitionTimer() {
+    std::lock_guard<std::mutex> lock(brightness_mutex_);
     if (brightness_ == target_brightness_) {
         esp_timer_stop(transition_timer_);
         return;

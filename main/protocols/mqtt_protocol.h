@@ -39,12 +39,12 @@ private:
     std::mutex channel_mutex_;
     std::unique_ptr<Mqtt> mqtt_;
     std::unique_ptr<Udp> udp_;
-    mbedtls_aes_context aes_ctx_;
+    mbedtls_aes_context aes_ctx_{};
     std::string aes_nonce_;
     std::string udp_server_;
-    int udp_port_;
-    uint32_t local_sequence_;
-    uint32_t remote_sequence_;
+    int udp_port_ = 0;
+    uint32_t local_sequence_ = 0;
+    uint32_t remote_sequence_ = 0;
 
     bool StartMqttClient(bool report_error=false);
     void ParseServerHello(const cJSON* root);

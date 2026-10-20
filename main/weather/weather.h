@@ -13,11 +13,10 @@
 class Weather
 {
 private:
-  char city[64];            /* 城市 */
-  char weather[32];         /* 天气情况 */
-  char temperature[10];     /* 温度 */
-  uint8_t code_;
-  esp_http_client_handle_t client;
+  char city[64] = "--";
+  char weather[32] = "--";
+  char temperature[10] = "--";
+  uint8_t code_ = 255;
 public:
   bool Get_Weather(void);
   char* Get_City_Value(void)

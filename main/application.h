@@ -7,6 +7,7 @@
 #include <esp_timer.h>
 
 #include <string>
+#include <atomic>
 #include <mutex>
 #include <deque>
 #include <vector>
@@ -16,6 +17,7 @@
 #include "ota.h"
 #include "audio_service.h"
 #include "device_state_event.h"
+#include "gesture_policy.h"
 
 #define MAIN_EVENT_SCHEDULE (1 << 0)
 #define MAIN_EVENT_SEND_AUDIO (1 << 1)
@@ -23,6 +25,7 @@
 #define MAIN_EVENT_VAD_CHANGE (1 << 3)
 #define MAIN_EVENT_ERROR (1 << 4)
 #define MAIN_EVENT_CHECK_NEW_VERSION_DONE (1 << 5)
+#define MAIN_EVENT_CLOCK (1 << 6)
 
 
 enum AecMode {
@@ -41,7 +44,7 @@ public:
     Application(const Application&) = delete;
     Application& operator=(const Application&) = delete;
     void Start();
-    DeviceState GetDeviceState() const { return device_state_; }
+    DeviceState GetDeviceState() const { return device_state_.load(); }
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
     void Schedule(std::function<void()> callback);
     void SetDeviceState(DeviceState state);
@@ -49,19 +52,21 @@ public:
     void DismissAlert();
     void AbortSpeaking(AbortReason reason);
     void ToggleChatState();
+    void HandleGesture(gesture_policy::Gesture gesture);
     void StartListening();
     void StopListening();
-    void ReturnToMainPage();
+    void ReturnToMainPage(std::function<bool()> condition = {});
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
     void SetAecMode(AecMode mode);
-    AecMode GetAecMode() const { return aec_mode_; }
+    AecMode GetAecMode() const { return aec_mode_.load(); }
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
 
 private:
+    std::atomic<bool> gesture_pending_{false};
     Application();
     ~Application();
 
@@ -70,15 +75,17 @@ private:
     std::unique_ptr<Protocol> protocol_;
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
-    volatile DeviceState device_state_ = kDeviceStateUnknown;
+    std::atomic<DeviceState> device_state_{kDeviceStateUnknown};
+    std::atomic<int64_t> chat_idle_start_us_{0};
     ListeningMode listening_mode_ = kListeningModeAutoStop;
-    AecMode aec_mode_ = kAecOff;
+    std::atomic<AecMode> aec_mode_{kAecOff};
+    std::mutex error_mutex_;
     std::string last_error_message_;
     AudioService audio_service_;
 
     bool has_server_time_ = false;
     bool aborted_ = false;
-    int clock_ticks_ = 0;
+    std::atomic<int> clock_ticks_{0};
     TaskHandle_t check_new_version_task_handle_ = nullptr;
     TaskHandle_t healthTaskHandle = nullptr;
 
@@ -87,6 +94,7 @@ private:
     void CheckNewVersion(Ota& ota);
     void ShowActivationCode(const std::string& code, const std::string& message);
     void OnClockTimer();
+    void OnClockTick();
     void SetListeningMode(ListeningMode mode);
     void EnterHomeStandby();
 };
